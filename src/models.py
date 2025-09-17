@@ -24,6 +24,7 @@ class AttentionHead(nn.Module):
 
     def __init__(self, d_model: int, d_k: int, d_q: int, d_v: int):
         super(AttentionHead, self).__init__()
+        # print(f"d_k = {d_k} ; d_q = {d_q} ; d_v = {d_v} ; d_model = {d_model}")
 
         self.wq = nn.Linear(d_model, d_q, bias=False)
         self.wk = nn.Linear(d_model, d_k, bias=False)
@@ -44,24 +45,25 @@ class AttentionHead(nn.Module):
         """
 
         # The dimension of the key tensor, used to scale the scores.
-        dim_k = q.shape[2]
+        dim_k = k.shape[2]
 
         # Calculate the dot product between query and the transpose of key.
         # The result is then scaled by the square root of dim_k.
-        dot_product = torch.matmul(q,k)
-        print("dot_product", dot_product.shape)
+        # print(f"dim(q) = {q.shape} ; dim(k) = {k.shape}")
+        dot_product = torch.matmul(q,k.transpose(1,2))
+        # print("dot_product", dot_product.shape)
         scores = dot_product / math.sqrt(dim_k)
-        print("scores", scores.shape)
+        # print("scores", scores.shape)
 
         # Apply the softmax function to obtain the attention weights.
-        weights = torch.softmax(scores)
-        print("weights", weights.shape)
+        weights = torch.softmax(scores, dim=-1)
+        # print("weights", weights.shape)
 
         # Compute the output by performing a weighted sum of the value tensor
         # using the attention weights.
         output = torch.matmul(weights,v)
         # output = torch.sum(weights*v)
-        print("output", output.shape)
+        # print("output", output.shape)
 
         return output, weights
 
@@ -101,9 +103,16 @@ class MultiHeadAttention(nn.Module):
 
     def __init__(self, d_model: int, num_attention_heads: int):
         super(MultiHeadAttention, self).__init__()
-        heads = [AttentionHead(d_model, 3, 3, 3) for _ in range(num_attention_heads)]
+        
+        d_q = 4
+        d_k = 4
+        d_v = 4
+        # Posible estrategia: d_v * num_att_heads = d_model
+        # En el paper dice que dq = dk = dv = d_model / num_att_heads es buena idea
+        heads = [AttentionHead(d_model, d_q, d_k, d_v) for _ in range(num_attention_heads)]
         self.heads = nn.ModuleList(heads)
-        self.output_linear = nn.Linear(d_model, d_model, bias=False)
+        # print(f"d_v: {d_v} ; num_attention_heads: {num_attention_heads}")
+        self.output_linear = nn.Linear(d_v * num_attention_heads, d_model, bias=False)
 
     def forward(self, hidden_state):
         """Forward pass for the multi-head attention layer.
@@ -114,8 +123,13 @@ class MultiHeadAttention(nn.Module):
         Returns:
             Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
-        for head in self.heads:
-            x = head(hidden_state)
+        if hidden_state.shape[2] % len(self.heads) != 0:
+            raise RuntimeError
+        head_outputs = [head(hidden_state) for head in self.heads]
+        # Concatenatenar outputs en la última dimensión (d_model)
+        concat_outputs = torch.cat(head_outputs, dim=-1)  # -> (batch, seq_len, num_heads * d_head)
+
+        x = self.output_linear(concat_outputs)
         return x
     
 class FeedForward(nn.Module):
@@ -136,9 +150,9 @@ class FeedForward(nn.Module):
 
     def __init__(self, d_model: int, intermediate_size: int):
         super(FeedForward, self).__init__()
-        self.linear_1 = None
-        self.linear_2 = None
-        self.gelu = None
+        self.linear_1 = nn.Linear(d_model, intermediate_size, bias=False)
+        self.linear_2 = nn.Linear(intermediate_size, d_model, bias=False)
+        self.gelu = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the feed-forward network.
@@ -149,7 +163,9 @@ class FeedForward(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
-        x = None
+        x = self.linear_1(x)
+        x = self.gelu(x)
+        x = self.linear_2(x)
         return x
 
 class TransformerEncoderLayer(nn.Module):
@@ -173,10 +189,10 @@ class TransformerEncoderLayer(nn.Module):
 
     def __init__(self, d_model: int, num_attention_heads: int, intermediate_size: int):
         super(TransformerEncoderLayer, self).__init__()
-        self.layer_norm_1 = None
-        self.layer_norm_2 = None
-        self.attention = None
-        self.feed_forward = None
+        self.layer_norm_1 = nn.LayerNorm(d_model)
+        self.layer_norm_2 = nn.LayerNorm(intermediate_size)
+        self.attention = MultiHeadAttention(d_model, num_attention_heads)
+        self.feed_forward = FeedForward(d_model, intermediate_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the Transformer encoder layer.
@@ -188,10 +204,10 @@ class TransformerEncoderLayer(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
         # Apply layer normalization and then apply multi-head attention
-        hidden_state = None
+        hidden_state = self.attention(self.layer_norm_1(x))
         
         # Apply layer normalization and then apply feed-forward network
-        x = None
+        x = self.feed_forward(self.layer_norm_2(hidden_state))
         
         return x
 
@@ -214,9 +230,9 @@ class Embeddings(nn.Module):
 
     def __init__(self, vocab_size: int, max_position_embeddings: int, d_model: int):
         super(Embeddings, self).__init__()
-        self.token_embeddings = None
-        self.position_embeddings = None
-        self.layer_norm = None
+        self.token_embeddings = nn.Embedding(num_embeddings=vocab_size, embedding_dim=d_model,)
+        self.position_embeddings = nn.Embedding(num_embeddings=max_position_embeddings,embedding_dim=d_model)
+        self.layer_norm = nn.LayerNorm(d_model)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Forward pass to combine token and positional embeddings.
@@ -228,15 +244,15 @@ class Embeddings(nn.Module):
             torch.Tensor: The combined and normalized embeddings of shape (batch_size, seq_len, d_model).
         """
         # Generate position IDs based on the input sequence length
-        seq_length = None
-        position_ids = None
+        seq_length = input_ids.shape[1]
+        position_ids = torch.tensor([i for i in range(seq_length)])
 
         # Create token and position embeddings
-        token_embeddings = None
-        position_embeddings = None
+        token_embeddings = self.token_embeddings(input_ids)
+        position_embeddings = self.position_embeddings(position_ids)
 
         # Combine token and position embeddings
-        embeddings = None
+        embeddings = self.layer_norm(token_embeddings + position_embeddings)
 
         return embeddings
     
@@ -263,8 +279,8 @@ class TransformerEncoder(nn.Module):
                 num_attention_heads: int, intermediate_size: int, num_hidden_layers: int
                  ):
         super(TransformerEncoder, self).__init__()
-        self.embeddings = None
-        self.layers = None
+        self.embeddings = Embeddings(vocab_size, max_position_embeddings, d_model)
+        self.layers = nn.ModuleList([TransformerEncoderLayer(d_model, num_attention_heads, intermediate_size) for _ in range(num_hidden_layers)])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the Transformer encoder.
@@ -275,7 +291,9 @@ class TransformerEncoder(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
-        x = None
+        x = self.embeddings(x)
+        for layer in self.layers:
+            x = layer(x)
         return x
     
 class ClassificationHead(nn.Module):
